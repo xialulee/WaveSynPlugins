@@ -9,6 +9,7 @@ from __future__ import print_function, division, unicode_literals
 
 import os
 import re
+import collections
 from py4j.java_gateway import JavaGateway
 
 from wavesynlib.languagecenter.utils import get_caller_dir
@@ -29,6 +30,15 @@ _gateway = JavaGateway.launch_gateway(die_on_exit=True, classpath=itext_filename
 class PdfManipulator(object):
     '''
 Supported Commands:
+    IO Commands:
+        read_from_file: read a PDF file, arguments: filename, return a stream;
+        write_to_file: write to a PDF file, arguments: filename.
+    Manipulation Commands:
+        append: append one or more PDF files to the end of the current stream;
+            arguments: filelist (the list of the PDF file names);
+        remove_pages: remove pages from the stream, 
+            arguments: pagenum (the number of the pages which will be removed);
+        remove_annotations: remove the annotations of the current stream.
 
 Command Pipeline Example:
 [
@@ -50,12 +60,14 @@ Command Pipeline Example:
         input_file = output_file = None        
         
         if read_command[0] == 'read_from_file':
-            input_file = _gateway.jvm.java.io.FileInputStream(read_command[1])
+            path = os.path.abspath(read_command[1])
+            input_file = _gateway.jvm.java.io.FileInputStream(path)
         else:
             raise NotImplementedError('The command is not implemented.')
             
         if write_command[0] == 'write_to_file':
-            output_file = _gateway.jvm.java.io.FileOutputStream(write_command[1])
+            path = os.path.abspath(write_command[1])
+            output_file = _gateway.jvm.java.io.FileOutputStream(path)
         else:
             raise NotImplementedError('The command is not implemented.')
             
@@ -63,15 +75,18 @@ Command Pipeline Example:
         input_stream = None
         output_stream = None
         
+        command_dict = {}
+        
         def append(input_stream, output_stream, *tail_files):
             input_streams = [input_stream]
             for tail_file in tail_files:
                 input_streams.append(_gateway.jvm.java.io.FileInputStream(tail_file))
             self._merge(input_streams, output_stream)
             
-        def remove_annotations(input_stream, output_stream):
-            self._remove_annotations(input_stream, output_stream)
-                    
+        command_dict['append'] = append
+        command_dict['remove_pages'] = self._remove_pages
+        command_dict['remove_annotations'] = self._remove_annotations
+                        
         try:
             for index, action in enumerate(actions):
                 if index == 0: # The first action, input_stream from FileInputStream
@@ -87,7 +102,7 @@ Command Pipeline Example:
                     output_stream = _gateway.jvm.java.io.ByteArrayOutputStream()
                     
                 action_name = action[0]
-                locals()[action_name](input_stream, output_stream, *action[1:])
+                command_dict[action_name](input_stream, output_stream, *action[1:])
         finally:
             if input_file is not None:
                 input_file.close()
@@ -116,6 +131,29 @@ Command Pipeline Example:
                 pdfcopy.close()
             if reader is not None:
                 reader.close()
+                
+                
+    def _remove_pages(self, input_stream, output_stream, page_num):
+        if not isinstance(page_num, collections.Iterable):
+            page_num = [page_num]
+        page_num = set(page_num)
+        
+        document = pdfcopy = reader = None
+        
+        try:
+            document = _gateway.jvm.com.itextpdf.text.Document()
+            pdfcopy = _gateway.jvm.com.itextpdf.text.pdf.PdfCopy(document, output_stream)
+            document.open()
+            
+            reader = _gateway.jvm.com.itextpdf.text.pdf.PdfReader(input_stream)
+            for n in range(reader.getNumberOfPages()):
+                if (n+1) not in page_num:
+                    pdfcopy.addPage(pdfcopy.getImportedPage(reader, n+1))
+                # else skip the page.
+        finally:
+            if reader is not None: reader.close()
+            if pdfcopy is not None: pdfcopy.close()
+            if document is not None: document.close()
                 
                 
     def _remove_annotations(self, input_stream, output_stream):
